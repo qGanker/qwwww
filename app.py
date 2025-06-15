@@ -4,6 +4,7 @@ import random
 import io
 import pandas as pd
 import os
+import time
 
 # --- Константы и функции ---
 
@@ -12,31 +13,29 @@ LEADERBOARD_FILE = "leaderboard.csv"
 def initialize_leaderboard():
     """Создает CSV-файл для таблицы лидеров, если он не существует."""
     if not os.path.exists(LEADERBOARD_FILE):
-        with open(LEADERBOARD_FILE, "w", newline="") as f:
+        with open(LEADERBOARD_FILE, "w", newline="", encoding='utf-8') as f:
             f.write("Ник,Группа,Процент,Правильных,Всего\n")
 
 def save_score(nickname, group, score, total):
     """Сохраняет результат пользователя в CSV-файл."""
-    percentage = round((score / total) * 100)
-    # Используем 'a' (append) для добавления новой строки в конец файла
+    percentage = round((score / total) * 100) if total > 0 else 0
     with open(LEADERBOARD_FILE, "a", newline="", encoding='utf-8') as f:
-        f.write(f"{nickname},{group},{percentage},{score},{total}\n")
+        f.write(f'"{nickname}","{group}",{percentage},{score},{total}\n')
 
-def load_leaderboard():
-    """Загружает и отображает таблицу лидеров."""
-    if os.path.exists(LEADERBOARD_FILE) and os.path.getsize(LEADERBOARD_FILE) > 20: # Проверка на непустой файл
+def load_leaderboard(search_query=""):
+    """Загружает и отображает таблицу лидеров с возможностью поиска."""
+    if os.path.exists(LEADERBOARD_FILE) and os.path.getsize(LEADERBOARD_FILE) > 20:
         try:
             df = pd.read_csv(LEADERBOARD_FILE)
+            if search_query:
+                df = df[df['Ник'].str.contains(search_query, case=False, na=False)]
             df_sorted = df.sort_values(by="Процент", ascending=False).reset_index(drop=True)
             st.subheader("🏆 Таблица лидеров (Топ-10)")
             st.dataframe(df_sorted.head(10))
-        except pd.errors.EmptyDataError:
+        except Exception:
             st.info("Таблица лидеров пока пуста.")
-        except Exception as e:
-            st.error(f"Не удалось загрузить таблицу лидеров: {e}")
     else:
         st.info("Таблица лидеров пока пуста. Пройдите тест, чтобы стать первым!")
-
 
 def parse_questions_from_text(text):
     text_no_pages = "\n".join([line for line in text.split('\n') if "--- PAGE" not in line])
@@ -83,7 +82,7 @@ def extract_text_from_pdf_pypdf(pdf_stream):
         st.error(f"Ошибка при чтении PDF: {e}")
         return None
 
-# --- Инициализация состояния сессии ---
+# --- Инициализация состояния сессии (добавлены новые поля) ---
 if 'page' not in st.session_state:
     st.session_state.page = "login"
     st.session_state.nickname = ""
@@ -94,8 +93,11 @@ if 'page' not in st.session_state:
     st.session_state.answer_submitted = False
     st.session_state.user_answer = ""
     st.session_state.current_options = []
+    st.session_state.incorrect_answers = [] # Для режима обзора ошибок
+    st.session_state.timer_enabled = False
+    st.session_state.seconds_per_question = 30
+    st.session_state.question_start_time = 0
 
-# Создаем файл таблицы лидеров при первом запуске
 initialize_leaderboard()
 
 # --- Логика отображения страниц ---
@@ -106,7 +108,7 @@ st.title("🎓 Интерактивный тест по PDF")
 if st.session_state.page == "login":
     st.subheader("Добро пожаловать!")
     with st.form("login_form"):
-        nickname = st.text_input("Введите ваш ник:")
+        nickname = st.text_input("ФИО:")
         group = st.text_input("Введите вашу группу:")
         submitted = st.form_submit_button("Войти и начать тест")
         if submitted:
@@ -117,30 +119,55 @@ if st.session_state.page == "login":
                 st.rerun()
             else:
                 st.error("Пожалуйста, заполните все поля.")
-    
     st.divider()
     load_leaderboard()
 
-# --- СТРАНИЦА 2: ЗАГРУЗКА ФАЙЛА ---
+# --- СТРАНИЦА 2: НАСТРОЙКА ТЕСТА И ЗАГРУЗКА ---
 elif st.session_state.page == "upload":
     st.write(f"Привет, **{st.session_state.nickname}** из группы **{st.session_state.group}**!")
-    st.write("Загрузите PDF-файл, чтобы начать тест.")
+    st.write("Загрузите PDF-файл и настройте тест.")
     
     uploaded_file = st.file_uploader("Выберите PDF файл", type="pdf", label_visibility="collapsed")
+    
     if uploaded_file:
-        with st.spinner('Пожалуйста, подождите. Идет обработка вашего PDF-файла...'):
+        with st.spinner('Пожалуйста, подождите. Идет обработка PDF...'):
             pdf_stream = io.BytesIO(uploaded_file.read())
             text = extract_text_from_pdf_pypdf(pdf_stream)
         if text:
             all_questions = parse_questions_from_text(text)
             if all_questions:
                 st.success(f"Файл успешно обработан! Найдено вопросов: {len(all_questions)}")
-                st.session_state.questions = random.sample(all_questions, min(40, len(all_questions)))
+                
+                # --- НОВЫЕ НАСТРОЙКИ ТЕСТА ---
+                st.divider()
+                st.subheader("⚙️ Настройки теста")
+                
+                num_questions_slider = st.slider(
+                    "1. Выберите количество вопросов:", 
+                    min_value=5, max_value=len(all_questions), 
+                    value=min(40, len(all_questions)), step=5
+                )
+
+                timer_enabled_checkbox = st.checkbox("2. Включить таймер на вопросы?")
+                seconds_per_question_input = 30
+                if timer_enabled_checkbox:
+                    seconds_per_question_input = st.number_input(
+                        "Время на один вопрос (секунд):", 
+                        min_value=10, max_value=120, value=30, step=5
+                    )
+                # --- КОНЕЦ НАСТРОЕК ---
+                
                 if st.button("Начать тест!", type="primary"):
+                    st.session_state.questions = random.sample(all_questions, num_questions_slider)
+                    st.session_state.timer_enabled = timer_enabled_checkbox
+                    st.session_state.seconds_per_question = seconds_per_question_input
+                    
                     st.session_state.page = "quiz"
+                    # Готовим первый вопрос
                     first_question_options = st.session_state.questions[0]['options'][:]
                     random.shuffle(first_question_options)
                     st.session_state.current_options = first_question_options
+                    st.session_state.question_start_time = time.time() # Запускаем таймер для первого вопроса
                     st.rerun()
             else:
                 st.warning("В файле не найдены вопросы в ожидаемом формате.")
@@ -149,59 +176,58 @@ elif st.session_state.page == "upload":
 elif st.session_state.page == "quiz":
     if st.session_state.current_question_index < len(st.session_state.questions):
         q = st.session_state.questions[st.session_state.current_question_index]
-        progress_value = (st.session_state.current_question_index) / len(st.session_state.questions)
-        st.progress(progress_value, text=f"Вопрос {st.session_state.current_question_index + 1}/{len(st.session_state.questions)}")
+        total_questions = len(st.session_state.questions)
+        
+        # Отображение прогресса и счета
+        progress_value = (st.session_state.current_question_index) / total_questions
+        st.progress(progress_value, text=f"Вопрос {st.session_state.current_question_index + 1}/{total_questions}")
+        st.info(f"Текущий счет: {st.session_state.score}")
+
         st.subheader(q["question"])
         
+        # Логика таймера
+        time_is_up = False
+        if st.session_state.timer_enabled:
+            elapsed_time = time.time() - st.session_state.question_start_time
+            remaining_time = st.session_state.seconds_per_question - elapsed_time
+            if remaining_time > 0:
+                st.sidebar.metric("Осталось времени", f"{int(remaining_time)} сек")
+            else:
+                time_is_up = True
+                st.sidebar.error("Время вышло!")
+
         if not st.session_state.answer_submitted:
-            st.session_state.user_answer = st.radio("Выберите ответ:", st.session_state.current_options, key=f"q_{st.session_state.current_question_index}")
-            if st.button("Ответить"):
-                st.session_state.answer_submitted = True
-                if st.session_state.user_answer == q["correct_answer"]:
-                    st.session_state.score += 1
-                st.rerun()
+            # Если время вышло, блокируем ответ
+            if time_is_up:
+                st.warning("Время на ответ истекло. Нажмите 'Дальше', чтобы перейти к следующему вопросу.")
+                if st.button("Дальше"):
+                    st.session_state.incorrect_answers.append({
+                        'question': q['question'], 'your_answer': "Время вышло", 'correct_answer': q['correct_answer']
+                    })
+                    st.session_state.current_question_index += 1
+                    # Готовим следующий вопрос
+                    if st.session_state.current_question_index < total_questions:
+                        next_q = st.session_state.questions[st.session_state.current_question_index]
+                        next_options = next_q['options'][:]
+                        random.shuffle(next_options)
+                        st.session_state.current_options = next_options
+                        st.session_state.question_start_time = time.time()
+                    st.rerun()
+            else:
+                st.session_state.user_answer = st.radio("Выберите ответ:", st.session_state.current_options, key=f"q_{st.session_state.current_question_index}")
+                if st.button("Ответить"):
+                    st.session_state.answer_submitted = True
+                    is_correct = st.session_state.user_answer == q["correct_answer"]
+                    if is_correct:
+                        st.session_state.score += 1
+                    else:
+                        st.session_state.incorrect_answers.append({
+                            'question': q['question'], 'your_answer': st.session_state.user_answer, 'correct_answer': q['correct_answer']
+                        })
+                    st.rerun()
         else:
             if st.session_state.user_answer == q["correct_answer"]:
                 st.success(f"Правильно! Ваш ответ: {st.session_state.user_answer}")
             else:
                 st.error(f"Неправильно. Ваш ответ: {st.session_state.user_answer}")
-                st.info(f"Верный ответ: {q['correct_answer']}")
-            
-            if st.button("Следующий вопрос"):
-                st.session_state.current_question_index += 1
-                st.session_state.answer_submitted = False
-                if st.session_state.current_question_index < len(st.session_state.questions):
-                    next_question_options = st.session_state.questions[st.session_state.current_question_index]['options'][:]
-                    random.shuffle(next_question_options)
-                    st.session_state.current_options = next_question_options
-                st.rerun()
-    else:
-        st.session_state.page = "results"
-        st.rerun()
-
-# --- СТРАНИЦА 4: РЕЗУЛЬТАТЫ ---
-elif st.session_state.page == "results":
-    st.header("Тест завершен!")
-    total = len(st.session_state.questions)
-    score = st.session_state.score
-    
-    percentage = round((score / total) * 100) if total > 0 else 0
-    
-    st.success(f"Ваш результат: {score} из {total} ({percentage}%)")
-    
-    # Сохраняем результат в таблицу лидеров
-    save_score(st.session_state.nickname, st.session_state.group, score, total)
-    
-    st.divider()
-    load_leaderboard()
-    st.divider()
-
-    if st.button("Пройти тест еще раз"):
-        # Сбрасываем только прогресс теста, оставляя логин
-        st.session_state.page = "upload"
-        st.session_state.questions = []
-        st.session_state.current_question_index = 0
-        st.session_state.score = 0
-        st.session_state.answer_submitted = False
-        st.session_state.current_options = []
-        st.rerun()
+                st
