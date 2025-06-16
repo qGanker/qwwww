@@ -2,42 +2,11 @@ import streamlit as st
 from pypdf import PdfReader
 import random
 import io
-import pandas as pd
-import os
 
-# --- Константы и функции ---
-
-LEADERBOARD_FILE = "leaderboard.csv"
-
-def initialize_leaderboard():
-    """Создает CSV-файл для таблицы лидеров, если он не существует."""
-    if not os.path.exists(LEADERBOARD_FILE):
-        with open(LEADERBOARD_FILE, "w", newline="", encoding='utf-8') as f:
-            f.write("Ник,Группа,Процент,Правильных,Всего\n")
-
-def save_score(nickname, group, score, total):
-    """Сохраняет результат пользователя в CSV-файл."""
-    percentage = round((score / total) * 100) if total > 0 else 0
-    with open(LEADERBOARD_FILE, "a", newline="", encoding='utf-8') as f:
-        f.write(f'"{nickname}","{group}",{percentage},{score},{total}\n')
-
-def load_leaderboard():
-    """Загружает и отображает таблицу лидеров."""
-    if os.path.exists(LEADERBOARD_FILE) and os.path.getsize(LEADERBOARD_FILE) > 20: # Проверка на непустой файл
-        try:
-            df = pd.read_csv(LEADERBOARD_FILE)
-            df_sorted = df.sort_values(by="Процент", ascending=False).reset_index(drop=True)
-            st.subheader("🏆 Таблица лидеров (Топ-10)(ЗА ПЕРВОЕ МЕСТО ДАНИИЛ ЖИЛИНСКИЙ из  д103 будет писать все ваши конспекты писать ему в лс)")
-            st.dataframe(df_sorted.head(10))
-        except pd.errors.EmptyDataError:
-            st.info("Таблица лидеров пока пуста.")
-        except Exception as e:
-            st.error(f"Не удалось загрузить таблицу лидеров: {e}")
-    else:
-        st.info("Таблица лидеров пока пуста. Пройдите тест, чтобы стать первым!")
-
+# --- Функции ---
 
 def parse_questions_from_text(text):
+    """Разбирает текст на вопросы и варианты ответов, включая правильные."""
     text_no_pages = "\n".join([line for line in text.split('\n') if "--- PAGE" not in line])
     question_blocks = text_no_pages.strip().split('?')
     parsed_questions = []
@@ -74,6 +43,7 @@ def parse_questions_from_text(text):
     return parsed_questions
 
 def extract_text_from_pdf_pypdf(pdf_stream):
+    """Извлекает текст из PDF с помощью pypdf."""
     try:
         reader = PdfReader(pdf_stream)
         full_text = "".join(page.extract_text() + "\n" for page in reader.pages)
@@ -82,11 +52,9 @@ def extract_text_from_pdf_pypdf(pdf_stream):
         st.error(f"Ошибка при чтении PDF: {e}")
         return None
 
-# --- Инициализация состояния сессии ---
-if 'page' not in st.session_state:
-    st.session_state.page = "login"
-    st.session_state.nickname = ""
-    st.session_state.group = ""
+# --- Инициализация состояния сессии (упрощенная) ---
+if 'quiz_started' not in st.session_state:
+    st.session_state.quiz_started = False
     st.session_state.questions = []
     st.session_state.current_question_index = 0
     st.session_state.score = 0
@@ -94,49 +62,26 @@ if 'page' not in st.session_state:
     st.session_state.user_answer = ""
     st.session_state.current_options = []
 
-# Создаем файл таблицы лидеров при первом запуске
-initialize_leaderboard()
-
-# --- Логика отображения страниц ---
+# --- Основной интерфейс приложения ---
 st.set_page_config(layout="centered")
 st.title("🎓 Интерактивный тест по PDF")
 
-# --- СТРАНИЦА 1: ЛОГИН ---
-if st.session_state.page == "login":
-    st.subheader("Добро пожаловать!")
-    with st.form("login_form"):
-        nickname = st.text_input("ФИО:")
-        group = st.text_input("Введите вашу группу:")
-        submitted = st.form_submit_button("Войти и начать тест")
-        if submitted:
-            if nickname and group:
-                st.session_state.nickname = nickname
-                st.session_state.group = group
-                st.session_state.page = "upload"
-                st.rerun()
-            else:
-                st.error("Пожалуйста, заполните все поля.")
-    
-    st.divider()
-    load_leaderboard()
-
-# --- СТРАНИЦА 2: ЗАГРУЗКА ФАЙЛА И НАСТРОЙКА ТЕСТА ---
-elif st.session_state.page == "upload":
-    st.write(f"Привет, **{st.session_state.nickname}** из группы **{st.session_state.group}**!")
-    st.write("Загрузите PDF-файл, чтобы начать тест.")
-    
+# Если тест еще не начат, показываем экран загрузки и настроек
+if not st.session_state.quiz_started:
+    st.write("Загрузите PDF-файл и настройте тест.")
     uploaded_file = st.file_uploader("Выберите PDF файл", type="pdf", label_visibility="collapsed")
+    
     if uploaded_file:
         with st.spinner('Пожалуйста, подождите. Идет обработка вашего PDF-файла...'):
             pdf_stream = io.BytesIO(uploaded_file.read())
             text = extract_text_from_pdf_pypdf(pdf_stream)
+        
         if text:
             all_questions = parse_questions_from_text(text)
             if all_questions:
                 st.success(f"Файл успешно обработан! Найдено вопросов: {len(all_questions)}")
-                
-                # --- НОВЫЙ БЛОК: ВЫБОР КОЛИЧЕСТВА ВОПРОСОВ ---
                 st.divider()
+                
                 num_questions_slider = st.slider(
                     "Выберите количество вопросов в тесте:", 
                     min_value=5, 
@@ -144,12 +89,11 @@ elif st.session_state.page == "upload":
                     value=min(40, len(all_questions)), 
                     step=5
                 )
-                # --- КОНЕЦ НОВОГО БЛОКА ---
                 
                 if st.button("Начать тест!", type="primary"):
-                    # ИЗМЕНЕНИЕ: Используем значение со слайдера
                     st.session_state.questions = random.sample(all_questions, num_questions_slider)
-                    st.session_state.page = "quiz"
+                    st.session_state.quiz_started = True
+                    # Готовим первый вопрос
                     first_question_options = st.session_state.questions[0]['options'][:]
                     random.shuffle(first_question_options)
                     st.session_state.current_options = first_question_options
@@ -157,12 +101,16 @@ elif st.session_state.page == "upload":
             else:
                 st.warning("В файле не найдены вопросы в ожидаемом формате.")
 
-# --- СТРАНИЦА 3: ТЕСТ ---
-elif st.session_state.page == "quiz":
+# Если тест начался, показываем вопросы или результаты
+else:
+    # Если еще есть вопросы
     if st.session_state.current_question_index < len(st.session_state.questions):
         q = st.session_state.questions[st.session_state.current_question_index]
-        progress_value = (st.session_state.current_question_index) / len(st.session_state.questions)
-        st.progress(progress_value, text=f"Вопрос {st.session_state.current_question_index + 1}/{len(st.session_state.questions)}")
+        total_questions = len(st.session_state.questions)
+        
+        progress_value = (st.session_state.current_question_index) / total_questions
+        st.progress(progress_value, text=f"Вопрос {st.session_state.current_question_index + 1}/{total_questions}")
+        st.info(f"Текущий счет: {st.session_state.score}")
         st.subheader(q["question"])
         
         if not st.session_state.answer_submitted:
@@ -182,38 +130,29 @@ elif st.session_state.page == "quiz":
             if st.button("Следующий вопрос"):
                 st.session_state.current_question_index += 1
                 st.session_state.answer_submitted = False
-                if st.session_state.current_question_index < len(st.session_state.questions):
-                    next_question_options = st.session_state.questions[st.session_state.current_question_index]['options'][:]
-                    random.shuffle(next_question_options)
-                    st.session_state.current_options = next_question_options
+                if st.session_state.current_question_index < total_questions:
+                    next_q = st.session_state.questions[st.session_state.current_question_index]
+                    next_options = next_q['options'][:]
+                    random.shuffle(next_options)
+                    st.session_state.current_options = next_options
                 st.rerun()
+    # Если вопросы закончились
     else:
-        st.session_state.page = "results"
-        st.rerun()
-
-# --- СТРАНИЦА 4: РЕЗУЛЬТАТЫ ---
-elif st.session_state.page == "results":
-    st.header("Тест завершен!")
-    total = len(st.session_state.questions)
-    score = st.session_state.score
-    
-    percentage = round((score / total) * 100) if total > 0 else 0
-    
-    st.success(f"Ваш результат: {score} из {total} ({percentage}%)")
-    
-    # Сохраняем результат в таблицу лидеров
-    save_score(st.session_state.nickname, st.session_state.group, score, total)
-    
-    st.divider()
-    load_leaderboard()
-    st.divider()
-
-    if st.button("Пройти тест еще раз"):
-        # Сбрасываем только прогресс теста, оставляя логин
-        st.session_state.page = "upload"
-        st.session_state.questions = []
-        st.session_state.current_question_index = 0
-        st.session_state.score = 0
-        st.session_state.answer_submitted = False
-        st.session_state.current_options = []
-        st.rerun()
+        st.header("Тест завершен!")
+        total = len(st.session_state.questions)
+        score = st.session_state.score
+        percentage = round((score / total) * 100) if total > 0 else 0
+        
+        st.success(f"Ваш результат: {score} из {total} ({percentage}%)")
+        
+        if percentage >= 90: st.balloons()
+        
+        if st.button("Пройти тест еще раз"):
+            # Сбрасываем состояние для нового теста
+            st.session_state.quiz_started = False
+            st.session_state.questions = []
+            st.session_state.current_question_index = 0
+            st.session_state.score = 0
+            st.session_state.answer_submitted = False
+            st.session_state.current_options = []
+            st.rerun()
